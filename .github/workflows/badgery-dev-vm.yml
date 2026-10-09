@@ -1,6 +1,8 @@
 # Dispatched by `pnpm dev:vm job` in badgery/badgery-ai (BADGERY_DEV_VM_REPO=
 # badgery-lab/public-smoke): a public repository's job on Badgery, which runs
 # only in its own microVM, with no cache and no LAN reach (Firecracker F6).
+# os=macos runs the same check in a macOS VM on a Mac (Tart, behind softnet),
+# with macOS's own tools; the Linux job is unchanged.
 # No secrets, by design: this repository is public.
 name: Badgery dev VM
 on:
@@ -17,9 +19,13 @@ on:
       closed:
         description: host:port targets on the LAN or tailnet that must not answer, space-separated
         default: ''
+      os:
+        description: the guest the check is written for, linux or macos
+        default: linux
 permissions: {}
 jobs:
   quick:
+    if: ${{ inputs.os != 'macos' }}
     runs-on: ${{ inputs.label }}
     timeout-minutes: 15
     steps:
@@ -46,6 +52,41 @@ jobs:
           code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' https://api.github.com/zen)
           echo "internet: $code"; test "$code" = 200
           gateway=$(ip -4 route show default | awk '{print $3; exit}')
+          bad=0
+          for target in "$gateway:22" "$gateway:53" "$gateway:80" "$gateway:443" "$gateway:8443" 169.254.169.254:80 100.100.100.100:53 $CLOSED; do
+            got=$(reach "${target%:*}" "${target##*:}")
+            echo "$target: $got"
+            [ "$got" = closed ] || bad=1
+          done
+          echo "cache: ${ACTIONS_CACHE_URL:-none} ${ACTIONS_RESULTS_URL:+results-url-set}"
+          exit $bad
+  quick-macos:
+    if: ${{ inputs.os == 'macos' }}
+    runs-on: ${{ inputs.label }}
+    timeout-minutes: 15
+    steps:
+      - name: The machine
+        shell: bash
+        run: |
+          uname -a
+          sw_vers
+          echo "cpus: $(sysctl -n hw.ncpu)"
+          id
+          scutil --dns | grep nameserver | sort -u
+      - name: The internet answers; the host, LAN and tailnet do not
+        shell: bash
+        env:
+          CLOSED: ${{ inputs.closed }}
+        run: |
+          reach() {
+            local err
+            if err=$(nc -z -G 3 -w 3 "$1" "$2" 2>&1); then echo open; return; fi
+            case $err in *refused*) echo refused ;; *) echo closed ;; esac
+          }
+          code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' https://api.github.com/zen)
+          echo "internet: $code"; test "$code" = 200
+          gateway=$(route -n get default | awk '/gateway:/ {print $2; exit}')
+          echo "gateway: $gateway"
           bad=0
           for target in "$gateway:22" "$gateway:53" "$gateway:80" "$gateway:443" "$gateway:8443" 169.254.169.254:80 100.100.100.100:53 $CLOSED; do
             got=$(reach "${target%:*}" "${target##*:}")
